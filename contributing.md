@@ -1,12 +1,14 @@
 # Contributing to Subject-Independent EEG-Based BCI
 
+Thank you for considering contributing to this project! This document provides guidelines and instructions for contributing.
+
 ## How to Contribute
 
 ### Reporting Issues
 
 If you find a bug or have a suggestion for improvement:
 
-1. Check if the issue already exists in the [Issues] section
+1. Check if the issue already exists in the [Issues](https://github.com/berdakh/Transfer-learning-BCI/issues ) section
 2. If not, create a new issue with a descriptive title and detailed description
 3. Include steps to reproduce the issue, expected behavior, and actual behavior
 4. Add relevant screenshots or error messages if applicable
