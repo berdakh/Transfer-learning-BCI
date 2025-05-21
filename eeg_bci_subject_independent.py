@@ -2,10 +2,11 @@
 Subject-Independent EEG-Based Brain-Computer Interface
 
 This script implements a subject-independent EEG-based BCI system using PyTorch and MNE-Python.
-It uses the BCI Competition IV Dataset 2a (available through MNE) and implements a custom
+It automatically downloads the BCI Competition IV Dataset 2a (through MOABB) and implements a custom
 CNN architecture inspired by EEGNetv4 and EEGConformer for transfer learning.
 
 The implementation includes:
+- Automatic dataset download
 - Data loading and preprocessing
 - Custom CNN architecture
 - Leave-one-subject-out cross-validation
@@ -19,9 +20,11 @@ Requirements:
 - NumPy
 - Matplotlib
 - scikit-learn
+- MOABB (pip install moabb)
 """
-
+#%%
 import os
+import time
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix
@@ -31,21 +34,36 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import mne
-from mne.datasets.bci_competition_iv import load_data
+import warnings
+warnings.filterwarnings('ignore')
+
+#%%
+# Install MOABB if not already installed
+try:
+    import moabb
+    from moabb.datasets import BNCI2014001
+    print(f"MOABB version: {moabb.__version__}")
+except ImportError:
+    print("Installing MOABB...")
+    import subprocess
+    subprocess.check_call(["pip", "install", "moabb"])
+    import moabb
+    from moabb.datasets import BNCI2014001
+    print(f"MOABB version: {moabb.__version__}")
 
 # Set random seeds for reproducibility
 np.random.seed(42)
 torch.manual_seed(42)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(42)
-
+#%%
 # Configuration parameters
 CONFIG = {
     'n_subjects': 9,  # BCI Competition IV Dataset 2a has 9 subjects
-    'selected_classes': [0, 1],  # Using only two classes (left hand, right hand)
+    'selected_classes': [1, 2],  # Using only two classes (left hand, right hand)
     'class_names': ['Left Hand', 'Right Hand'],
     'n_channels': 22,  # Number of EEG channels
-    'n_times': 1000,  # Number of time points (1000 Hz for 4 seconds)
+    'n_times': 1000,  # Number of time points (250 Hz for 4 seconds)
     'batch_size': 32,
     'learning_rate': 0.001,
     'n_epochs': 100,
@@ -59,73 +77,62 @@ print(f"Using device: {CONFIG['device']}")
 # Create results directory if it doesn't exist
 os.makedirs(CONFIG['results_dir'], exist_ok=True)
 
-
+#%%
 def load_bci_competition_data():
     """
-    Load the BCI Competition IV Dataset 2a from MNE and preprocess it.
+    Load the BCI Competition IV Dataset 2a using MOABB.
     
     Returns:
         X_data: Dictionary of EEG data for each subject
         y_data: Dictionary of labels for each subject
     """
-    print("Loading BCI Competition IV Dataset 2a...")
+    print("Loading BCI Competition IV Dataset 2a using MOABB...")
+    
+    # Initialize the dataset
+    dataset = BNCI2014001()
+    
+    # This will download the dataset if it's not already downloaded
+    print("Checking if dataset needs to be downloaded...")
+    dataset.download()
+    print("Dataset is ready.")
     
     X_data = {}
     y_data = {}
     
     # Load data for each subject
     for subject_id in range(1, CONFIG['n_subjects'] + 1):
-        # Load training data
-        train_data = load_data(subject_id, training=True)
-        # Load test data
-        test_data = load_data(subject_id, training=False)
+        print(f"Processing Subject {subject_id}...")
         
-        # Extract raw EEG data and events
-        raw_train = train_data[0]
-        events_train = train_data[1]
-        raw_test = test_data[0]
-        events_test = test_data[1]
-        
-        # Combine training and test data for the subject
-        raw_combined = mne.concatenate_raws([raw_train, raw_test])
-        events_combined = np.vstack((events_train, events_test))
-        
-        # Extract epochs for the selected classes
-        event_id = {
-            'left_hand': 1,  # Class 0
-            'right_hand': 2,  # Class 1
-        }
-        
-        # Create epochs with baseline correction
-        epochs = mne.Epochs(
-            raw_combined, 
-            events_combined, 
-            event_id=event_id, 
-            tmin=0.0,  # Start time relative to event
-            tmax=4.0,  # End time relative to event (4 seconds)
-            baseline=(0, 0),  # Baseline correction
-            preload=True
-        )
-        
-        # Extract data and labels
-        X = epochs.get_data()  # Shape: (n_epochs, n_channels, n_times)
-        y = epochs.events[:, -1] - 1  # Convert to 0-based indexing
-        
-        # Filter to include only the selected classes
-        mask = np.isin(y, CONFIG['selected_classes'])
-        X = X[mask]
-        y = y[mask]
-        
-        # Map class indices to 0 and 1
-        y_mapped = np.zeros_like(y)
-        for i, class_idx in enumerate(CONFIG['selected_classes']):
-            y_mapped[y == class_idx] = i
-        
-        # Store data for this subject
-        X_data[subject_id] = X
-        y_data[subject_id] = y_mapped
-        
-        print(f"Subject {subject_id}: {X.shape[0]} trials")
+        try:
+            # Get the data for this subject
+            X, y, _ = dataset.get_data(subjects=[subject_id])
+            
+            # X is a dict with keys 'session_T' and 'session_E' for training and evaluation
+            # Combine both sessions
+            X_combined = np.concatenate((X['session_T'], X['session_E']), axis=0)
+            y_combined = np.concatenate((y['session_T'], y['session_E']), axis=0)
+            
+            # Filter to include only the selected classes
+            mask = np.isin(y_combined, CONFIG['selected_classes'])
+            X_filtered = X_combined[mask]
+            y_filtered = y_combined[mask]
+            
+            # Map class indices to 0 and 1
+            y_mapped = np.zeros_like(y_filtered)
+            for i, class_idx in enumerate(CONFIG['selected_classes']):
+                y_mapped[y_filtered == class_idx] = i
+            
+            # Store data for this subject
+            X_data[subject_id] = X_filtered
+            y_data[subject_id] = y_mapped
+            
+            print(f"Subject {subject_id}: {X_filtered.shape[0]} trials")
+            
+        except Exception as e:
+            print(f"Error processing Subject {subject_id}: {e}")
+            # Create empty arrays if data loading fails
+            X_data[subject_id] = np.array([])
+            y_data[subject_id] = np.array([])
     
     return X_data, y_data
 
@@ -142,6 +149,10 @@ def preprocess_data(X, y):
         X_processed: Preprocessed EEG data
         y: Labels (unchanged)
     """
+    # Check if data is empty
+    if X.shape[0] == 0:
+        return X, y
+    
     # Get dimensions
     n_trials, n_channels, n_times = X.shape
     
@@ -201,8 +212,11 @@ class EEGHybridNet(nn.Module):
             nn.Dropout(dropout_rate)
         )
         
+        # Calculate the size after convolutions and pooling
+        time_after_pool = n_times // (4 * 8 * 4)
+        self.attention_size = 32 * time_after_pool
+        
         # Fourth block: Self-attention mechanism (inspired by EEGConformer)
-        self.attention_size = 32 * (n_times // (4 * 8 * 4))  # Size after convolutions and pooling
         self.attention = nn.Sequential(
             nn.Linear(self.attention_size, self.attention_size),
             nn.LayerNorm(self.attention_size),
@@ -491,6 +505,11 @@ def visualize_eeg_data(X, y, subject_id, n_samples=5):
         subject_id: Subject ID
         n_samples: Number of samples to visualize per class
     """
+    # Check if data is empty
+    if X.shape[0] == 0:
+        print(f"No data available for Subject {subject_id}, skipping visualization.")
+        return
+    
     plt.figure(figsize=(15, 10))
     
     for class_idx, class_name in enumerate(CONFIG['class_names']):
@@ -596,6 +615,17 @@ def run_leave_one_subject_out_cv(X_data, y_data):
         print(f"Testing on Subject {test_subject}")
         print(f"{'='*50}")
         
+        # Check if test subject has data
+        if X_data[test_subject].shape[0] == 0:
+            print(f"No data available for Subject {test_subject}, skipping.")
+            results[test_subject] = {
+                'base_accuracy': 0.0,
+                'base_auc': 0.0,
+                'ft_accuracy': 0.0,
+                'ft_auc': 0.0
+            }
+            continue
+        
         # Prepare test data
         X_test, y_test = X_data[test_subject], y_data[test_subject]
         X_test, y_test = preprocess_data(X_test, y_test)
@@ -616,9 +646,20 @@ def run_leave_one_subject_out_cv(X_data, y_data):
         y_train_all = []
         
         for train_subject in range(1, CONFIG['n_subjects'] + 1):
-            if train_subject != test_subject:
+            if train_subject != test_subject and X_data[train_subject].shape[0] > 0:
                 X_train_all.append(X_data[train_subject])
                 y_train_all.append(y_data[train_subject])
+        
+        # Check if we have any training data
+        if len(X_train_all) == 0:
+            print(f"No training data available for Subject {test_subject}, skipping.")
+            results[test_subject] = {
+                'base_accuracy': 0.0,
+                'base_auc': 0.0,
+                'ft_accuracy': 0.0,
+                'ft_auc': 0.0
+            }
+            continue
         
         X_train_all = np.concatenate(X_train_all, axis=0)
         y_train_all = np.concatenate(y_train_all, axis=0)
@@ -759,11 +800,16 @@ def visualize_overall_results(results):
     ft_accuracies = [results[s]['ft_accuracy'] for s in subjects]
     ft_aucs = [results[s]['ft_auc'] for s in subjects]
     
-    # Calculate averages
-    avg_base_acc = np.mean(base_accuracies)
-    avg_base_auc = np.mean(base_aucs)
-    avg_ft_acc = np.mean(ft_accuracies)
-    avg_ft_auc = np.mean(ft_aucs)
+    # Calculate averages (excluding zeros)
+    valid_base_acc = [acc for acc in base_accuracies if acc > 0]
+    valid_base_auc = [auc for auc in base_aucs if auc > 0]
+    valid_ft_acc = [acc for acc in ft_accuracies if acc > 0]
+    valid_ft_auc = [auc for auc in ft_aucs if auc > 0]
+    
+    avg_base_acc = np.mean(valid_base_acc) if valid_base_acc else 0
+    avg_base_auc = np.mean(valid_base_auc) if valid_base_auc else 0
+    avg_ft_acc = np.mean(valid_ft_acc) if valid_ft_acc else 0
+    avg_ft_auc = np.mean(valid_ft_auc) if valid_ft_auc else 0
     
     # Plot accuracies
     plt.figure(figsize=(12, 6))
@@ -812,11 +858,14 @@ def visualize_overall_results(results):
     print("\nOverall Results:")
     print(f"Base Model - Average Accuracy: {avg_base_acc:.4f}, Average AUC: {avg_base_auc:.4f}")
     print(f"Fine-tuned Model - Average Accuracy: {avg_ft_acc:.4f}, Average AUC: {avg_ft_auc:.4f}")
-    print(f"Improvement - Accuracy: {avg_ft_acc - avg_base_acc:.4f}, AUC: {avg_ft_auc - avg_base_auc:.4f}")
+    
+    if avg_ft_acc > 0 and avg_base_acc > 0:
+        print(f"Improvement - Accuracy: {avg_ft_acc - avg_base_acc:.4f}, AUC: {avg_ft_auc - avg_base_auc:.4f}")
 
 
 def main():
     """Main function to run the entire pipeline."""
+    start_time = time.time()
     print("Starting Subject-Independent EEG-Based BCI Implementation")
     
     # Load and preprocess data
@@ -828,9 +877,15 @@ def main():
     # Visualize overall results
     visualize_overall_results(results)
     
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    
     print("\nImplementation completed successfully!")
+    print(f"Total execution time: {elapsed_time:.2f} seconds ({elapsed_time/60:.2f} minutes)")
     print(f"Results and visualizations saved to: {os.path.abspath(CONFIG['results_dir'])}")
 
 
 if __name__ == "__main__":
     main()
+
+# %%
